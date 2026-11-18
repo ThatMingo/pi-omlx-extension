@@ -1,0 +1,23 @@
+{
+	"$comment": "Optional editor/type tooling. Pi loads the extension with its own loader (jiti) and Node 22.18+ runs the TypeScript tests directly, so there is no build step and no vendored compiler. `npm run typecheck` needs a `tsc` on PATH (or `npx -p typescript tsc -p tsconfig.json`) and checks the shipped extension against the Pi typings resolved from the global install below; adjust those paths if Pi is installed elsewhere. Tests and scripts are excluded: they exercise Pi's internals through dynamic imports, so they are run by Node rather than type-checked.",
+	"compilerOptions": {
+		"target": "ES2022",
+		"lib": ["ES2023", "DOM"],
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"strict": true,
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"verbatimModuleSyntax": true,
+		"skipLibCheck": true,
+		"types": [],
+		"baseUrl": ".",
+		"paths": {
+			"@earendil-works/pi-coding-agent": ["/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.d.ts"],
+			"@earendil-works/pi-ai": ["/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
+			"@earendil-works/pi-ai/compat": ["/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/compat.d.ts"],
+			"@earendil-works/pi-tui": ["/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui/dist/index.d.ts"]
+		}
+	},
+	"include": ["pi-omlx-model-picker.ts", "src/**/*.ts"]
+}

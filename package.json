@@ -1,0 +1,21 @@
+{
+	"name": "pi-omlx-model-picker",
+	"version": "2.0.0",
+	"private": true,
+	"type": "module",
+	"description": "Pi coding agent addon: dynamic oMLX model picker with real per-model reasoning levels",
+	"scripts": {
+		"test": "node --test test/*.test.ts",
+		"typecheck": "tsc -p tsconfig.json",
+		"check": "node scripts/verify-omlx.ts",
+		"check:live": "node scripts/verify-omlx.ts --probe"
+	},
+	"engines": {
+		"node": ">=22.18"
+	},
+	"pi": {
+		"extensions": [
+			"./pi-omlx-model-picker.ts"
+		]
+	}
+}
