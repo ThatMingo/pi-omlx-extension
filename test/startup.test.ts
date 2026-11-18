@@ -176,17 +176,9 @@ if (!skip) {
 	});
 }
 
-const skipOr = (fn: () => Promise<void> | void) => async () => {
-	if (skip) {
-		console.warn(`\n  ${skip}`);
-		return;
-	}
-	await fn();
-};
-
 test(
 	"the first run persists what it discovered, so the next startup starts from it",
-	skipOr(async () => {
+	{ skip }, async () => {
 		const { services, session, requestsAtStartup } = await startupPi();
 		// A cold process has no discovered catalog yet: startup can only resolve models.json's static
 		// entry, and no oMLX request has happened at all.
@@ -202,12 +194,12 @@ test(
 		assert.equal(readFileSync(join(home, "models.json"), "utf8").includes('"reasoning": false'), true, "models.json is never rewritten by the extension");
 
 		session.dispose();
-	}),
+	},
 );
 
 test(
 	"restart resolves the selected model with oMLX's capabilities before any catalog refresh",
-	skipOr(async () => {
+	{ skip }, async () => {
 		// Simulate the persisted snapshot a previous Pi run wrote: keep what the extension stored, but
 		// drop "high" so the restored capabilities are distinguishable from both models.json and a live read.
 		const stored = readStore();
@@ -236,12 +228,12 @@ test(
 		assert.notEqual(session.thinkingLevel, "off");
 
 		session.dispose();
-	}),
+	},
 );
 
 test(
 	"restart keeps thinking control on a resumed session and sends the level to oMLX",
-	skipOr(async () => {
+	{ skip }, async () => {
 		const services = await agentServices.createAgentSessionServices({
 			cwd,
 			agentDir: home,
@@ -268,12 +260,12 @@ test(
 		assert.equal(payload.reasoning_effort, "medium");
 
 		session.dispose();
-	}),
+	},
 );
 
 test(
 	"the persisted catalog is a starting point, not a cache: a refresh replaces changed capabilities",
-	skipOr(async () => {
+	{ skip }, async () => {
 		served = fixtureCatalog.map((model) => (model.id === MODEL_ID ? { ...model, reasoning_efforts: ["low", "medium", "high", "xhigh"], thinking_default: true } : model));
 		const { services, session, requestsAtStartup } = await startupPi();
 		assert.equal(requestsAtStartup, 0);
@@ -294,12 +286,12 @@ test(
 		assert.equal(services.modelRuntime.getModel("omlx", "MaxEffort-Model"), undefined);
 
 		session.dispose();
-	}),
+	},
 );
 
 test(
 	"startup with oMLX unreachable still knows the models it discovered before",
-	skipOr(async () => {
+	{ skip }, async () => {
 		await closeServer(server);
 		const { services, session, requestsAtStartup } = await startupPi();
 		assert.equal(requestsAtStartup, 0);
@@ -322,12 +314,12 @@ test(
 		session.dispose();
 		served = [...fixtureCatalog];
 		await restartServer();
-	}),
+	},
 );
 
 test(
 	"a restored catalog adopts the base URL models.json configures, not the one it was stored with",
-	skipOr(async () => {
+	{ skip }, async () => {
 		// A previous run persisted the catalog while oMLX listened on a host that is gone. Every model
 		// definition carries its own base URL, and Pi honors a model's own URL above the provider URL
 		// from models.json — so an unrestamped snapshot would send this session to the retired host
@@ -353,5 +345,5 @@ test(
 		);
 
 		session.dispose();
-	}),
+	},
 );

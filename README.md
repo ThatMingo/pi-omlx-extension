@@ -10,7 +10,7 @@ Two features, both built on Pi's native provider architecture:
 No commands, no custom UI, no credentials, no config files, no automatic level switching, no model loading/unloading. Only `GET` requests.
 
 ```
-pi-omlx-model-picker.ts         78 lines: register `omlx` as a dynamic provider with refreshModels
+pi-omlx-model-picker.ts         register `omlx` as a dynamic provider with refreshModels
 src/omlx.ts                     oMLX catalog read, chat-model filter, capability → thinkingLevelMap
 test/omlx.test.ts               catalog + capability unit tests
 test/extension.test.ts          refresh phases, add/remove, credential, failure, persisted catalog, publication and cancellation rules
@@ -60,7 +60,7 @@ So the offline phase publishes the discovered capabilities itself: this process'
 | `model_type`, `engine_type`, `realtime_*` | service kind, chat vs non-chat |
 | `max_context_window`, `model_context_length`, `max_tokens` | limits |
 
-Levels are derived with the same rule oMLX uses to build its own reasoning slider (`admin/routes._reasoning_levels`), minus oMLX's family-specific overrides — so the values offered are exactly the values oMLX accepts, and no family name is ever inspected:
+Levels follow oMLX's reasoning slider (`admin/routes.reasoning_levels`), including its family-specific overrides for DeepSeek V4/V4.1, GPT-OSS, K2 Horizon, and MiniMax M3. Pi displays only levels it supports:
 
 | oMLX reports | Pi levels |
 |---|---|
@@ -84,7 +84,7 @@ Levels are derived with the same rule oMLX uses to build its own reasoning slide
 
 Unsupported levels never need patching: `clampThinkingLevel` runs inside Pi's request builder, so Pi clamps to the model's own vocabulary before the payload exists. Verified live below (`!` marks a clamped request). Other compat flags follow oMLX's request schema: `maxTokensField: "max_tokens"`, `supportsReasoningEffort` per model, `supportsStore/supportsDeveloperRole/supportsStrictMode: false`, `supportsUsageInStreaming: true`.
 
-**Filtering** is metadata-only: `is_helper`, `is_hidden`, `realtime_voice`/`realtime_stt`, and oMLX's non-chat service types (`markitdown`, `embedding*`, `reranker`, `audio_*`, `decision`) are dropped. An oMLX model type this extension has never seen is kept when oMLX reports chat limits for it, so a new chat family is not excluded by an out-of-date type list. Limits come from the tightest reported value; `max_tokens` is capped by the context window; `vlm` engine ⇒ `input: ["text","image"]`.
+**Filtering** is metadata-only: `is_helper`, `is_hidden`, `realtime_voice`/`realtime_stt`, and oMLX's non-chat service types (`markitdown`, `embedding*`, `reranker`, `audio_*`, `decision`) are dropped. An oMLX model type this extension has never seen is kept when oMLX reports chat limits for it, so a new chat family is not excluded by an out-of-date type list. Limits come from the tightest reported value; `max_tokens` is capped by the context window; `model_type: "vlm"` ⇒ `input: ["text","image"]`; `engine_type` alone is not sufficient because oMLX can run text-only models on its VLM engine.
 
 ## Credentials
 
@@ -93,7 +93,7 @@ The extension adds none. It sends no key of its own: Pi composes the provider fr
 ## Verify
 
 ```bash
-npm test          # 44 tests: 16 unit + 14 extension refresh/publication + 8 against Pi's real provider composer / thinking selector / request builder + 6 against Pi's real startup path
+npm test          # 46 tests: 18 unit + 14 extension refresh/publication + 8 against Pi's real provider composer / thinking selector / request builder + 6 against Pi's real startup path
 npm run typecheck # tsc -p tsconfig.json against the shipped code (needs a tsc on PATH, e.g. `npx -p typescript tsc -p tsconfig.json`; none is vendored here)
 npm run check     # read-only: live catalog, filtered entries, and the exact payload Pi sends per level
 npm run check:live # additionally runs one short completion per level on a model oMLX already has loaded
@@ -161,8 +161,7 @@ Pi labels an extension by its entry file, which is why the entry point is `pi-om
 
 ## Limitations
 
-- **oMLX's family-specific effort vocabularies are not visible.** oMLX's admin slider overrides efforts for a few internal families (`k2_horizon`, `deepseek_v4*`, `gpt_oss` harmony collapsing). `/v1/models/status` reports what the checkpoint template names, so such models get the template-detected vocabulary instead of oMLX's override. Using `/admin/api/models` would supply those overrides, but it is an admin endpoint whose availability varies, and its failure handling was a known source of breakage — the catalog now depends on one OpenAI-compatible endpoint only.
-- **Thinking that cannot be switched off is not detectable through `/v1/models/status`.** oMLX marks forced thinking in its admin API only. A forced-thinking model would therefore show an `off` level; oMLX ignores that switch rather than erroring.
+- **Family-specific levels can change with oMLX updates.** The status endpoint reports checkpoint metadata rather than the admin slider's final levels. The extension mirrors the current oMLX exceptions for K2 Horizon, DeepSeek V4/V4.1, GPT-OSS, and MiniMax M3 without requiring admin access; new exception families may need a code update.
 - **`/v1/models/status` is the only oMLX endpoint used.** If it is unavailable (older server build, auth failure), the catalog does not change and Pi surfaces the error; the extension does not guess a catalog from `/v1/models`, which lists drafters and non-chat services without their metadata.
 - **Capabilities are known from the second run onward.** Pi resolves the session model before it reads oMLX over the network, so a process can only start from capabilities it already has. The first Pi run after installing the extension therefore uses `models.json`'s entry until its first successful read lands moments later (reopening `/model` or restarting settles it); every later start, including `PI_OFFLINE=1` and `/reload`, starts from the persisted capabilities. A saved snapshot is only ever replaced by a successful read, so it is at most one startup behind oMLX.
 - **Pi's level vocabulary is fixed** (`off, minimal, low, medium, high, xhigh, max`); oMLX names outside it cannot be exposed, and Pi clamps removed levels to the nearest supported one.

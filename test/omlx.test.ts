@@ -87,6 +87,25 @@ test("a model without reasoning control is not a reasoning model", () => {
 	assert.deepEqual(capability.efforts, []);
 });
 
+test("oMLX family-specific reasoning overrides match its own selector", () => {
+	const base = { ...fixtures.plainChat, thinking_default: null, reasoning_efforts: null };
+	const levels = (config_model_type: string, changes: Partial<typeof base> = {}) =>
+		levelsOf(capabilityOf({ ...base, config_model_type, ...changes }));
+
+	assert.deepEqual(levels("DeepSeek-V4"), ["off", "low", "high", "max"]);
+	assert.deepEqual(levels("deepseek_v41"), ["off", "low", "high", "max"]);
+	assert.deepEqual(levels("minimax_m3"), ["off", "low"]);
+	assert.deepEqual(levels("gpt_oss", { reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] }), ["low", "medium", "high"]);
+	assert.deepEqual(levels("k2_horizon", { thinking_default: true }), ["low", "medium", "high"], "K2 Horizon forces thinking on");
+});
+
+test("vision depends on the discovered model type, not the serving engine", () => {
+	const textOnly = modelConfigOf({ ...fixtures.plainChat, engine_type: "vlm", model_type: "llm" }, BASE_URL);
+	const vision = modelConfigOf({ ...fixtures.plainChat, engine_type: "batched", model_type: "vlm" }, BASE_URL);
+	assert.deepEqual(textOnly.input, ["text"]);
+	assert.deepEqual(vision.input, ["text", "image"]);
+});
+
 test("model metadata: capabilities, modalities, and limits come from oMLX", () => {
 	const model = modelConfigOf(fixtures.fullDial, BASE_URL);
 	assert.equal(model.reasoning, true);
