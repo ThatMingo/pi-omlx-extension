@@ -18,9 +18,14 @@ const PI_DIR = process.env.PI_PACKAGE_DIR ?? "/opt/homebrew/lib/node_modules/@ea
 const PI_AI_DIR = `${PI_DIR}/node_modules/@earendil-works/pi-ai/dist`;
 const skip = existsSync(PI_DIR) ? false : `Pi package not found at ${PI_DIR}`;
 
-const composer = await import(`${PI_DIR}/dist/core/provider-composer.js`);
-const openaiCompletions = await import(`${PI_AI_DIR}/api/openai-completions.js`);
-const modelsModule = await import(`${PI_AI_DIR}/models.js`);
+let composer: any;
+let openaiCompletions: any;
+let modelsModule: any;
+if (!skip) {
+	composer = await import(`${PI_DIR}/dist/core/provider-composer.js`);
+	openaiCompletions = await import(`${PI_AI_DIR}/api/openai-completions.js`);
+	modelsModule = await import(`${PI_AI_DIR}/models.js`);
+}
 
 /** The `omlx` entry as Pi's `models.json` configures it today, including a stale manual model. */
 const modelsJsonProvider = {
