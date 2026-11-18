@@ -1,0 +1,22 @@
+# macOS archive metadata
+.DS_Store
+._*
+__MACOSX/
+
+# Node / build / test artifacts
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+*.log
+.npm/
+
+# Local configuration / credentials
+.env
+.env.*
+!.env.example
+.pi/
+/models.json
+/models-store.json
+*.pem
+*.key
