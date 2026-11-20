@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildCatalog, capabilityOf, isChatModel, levelsOf, modelConfigOf, statusUrlOf, fetchModelStatus, PI_LEVELS } from "../src/omlx.ts";
+import { buildCatalog, capabilityOf, isChatModel, modelConfigOf, statusUrlOf, fetchModelStatus, PI_LEVELS } from "../src/omlx.ts";
 import * as fixtures from "./fixtures/omlx-status.ts";
 
 const BASE_URL = "http://127.0.0.1:8000/v1";
+const levelsOf = (capability: ReturnType<typeof capabilityOf>) =>
+	PI_LEVELS.filter((level) => capability.thinkingLevelMap[level] !== null);
 
 test("filtering keeps every chat model and drops oMLX's non-chat entries", () => {
 	const kept = fixtures.catalog.filter((model) => isChatModel(model).included).map((model) => model.id);
@@ -84,13 +86,45 @@ test("a model without reasoning control is not a reasoning model", () => {
 	const capability = capabilityOf(fixtures.plainChat);
 	assert.equal(capability.reasoning, false);
 	assert.equal(capability.supportsReasoningEffort, false);
-	assert.deepEqual(capability.efforts, []);
+});
+
+test("legacy servers use known family rules and template metadata", () => {
+	const base = { ...fixtures.plainChat, thinking_default: null, reasoning_efforts: null };
+	const levels = (config_model_type: string, changes: Partial<typeof base> = {}) =>
+		levelsOf(capabilityOf({ ...base, config_model_type, ...changes }));
+
+	assert.deepEqual(levels("DeepSeek-V4"), ["off", "low", "high", "max"]);
+	assert.deepEqual(levels("deepseek_v41"), ["off", "low", "high", "max"]);
+	assert.deepEqual(levels("minimax_m3"), ["off", "low"]);
+	assert.deepEqual(levels("gpt_oss", { reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] }), ["low", "medium", "high"]);
+	assert.deepEqual(levels("k2_horizon", { thinking_default: true }), ["low", "medium", "high"]);
+});
+
+test("server-provided reasoning levels take precedence even when empty", () => {
+	const base = { ...fixtures.fullDial, config_model_type: "k2_horizon" };
+	assert.deepEqual(levelsOf(capabilityOf({ ...base, reasoning_levels: ["off", "xhigh"] })), ["off", "xhigh"]);
+	assert.deepEqual(levelsOf(capabilityOf({ ...base, reasoning_levels: [] })), []);
+	assert.deepEqual(levelsOf(capabilityOf({ ...base, reasoning_levels: ["on"] })), ["low"]);
+});
+
+test("unrepresentable reasoning levels do not create a Pi effort dial", () => {
+	const capability = capabilityOf({ ...fixtures.plainChat, reasoning_levels: ["future", "minimal"] });
+	assert.equal(capability.reasoning, false);
+	assert.equal(capability.supportsReasoningEffort, false);
+	assert.deepEqual(levelsOf(capability), []);
+});
+
+test("vision depends on the reported model type", () => {
+	const textOnly = modelConfigOf({ ...fixtures.plainChat, engine_type: "vlm", model_type: "llm" }, BASE_URL);
+	const vision = modelConfigOf({ ...fixtures.plainChat, engine_type: "batched", model_type: "vlm" }, BASE_URL);
+	assert.deepEqual(textOnly.input, ["text"]);
+	assert.deepEqual(vision.input, ["text", "image"]);
 });
 
 test("model metadata: capabilities, modalities, and limits come from oMLX", () => {
 	const model = modelConfigOf(fixtures.fullDial, BASE_URL);
 	assert.equal(model.reasoning, true);
-	assert.deepEqual(model.input, ["text", "image"], "vlm engine reports image input");
+	assert.deepEqual(model.input, ["text", "image"], "vlm model type reports image input");
 	assert.equal(model.contextWindow, 262144);
 	assert.equal(model.maxTokens, 65536);
 	assert.equal(model.compat?.thinkingFormat, "qwen");
@@ -160,24 +194,20 @@ test("the catalog request is a GET that reuses the provided key as a bearer toke
 });
 
 test("failures name the endpoint and status without repeating the key", async () => {
-	const { fetchImpl } = await fetchWith({ error: { code: "authentication_error", message: "nope" } }, {
-		status: 401,
-		text: '{"error":{"code":"authentication_error","message":"nope"}}',
-	});
+	const { fetchImpl } = await fetchWith({ error: { code: "secret-key-value" } }, { status: 401 });
 	const error = await fetchModelStatus({ baseUrl: BASE_URL, apiKey: "secret-key-value", fetchImpl }).catch((e) => e);
 	assert.match(error.message, /401/);
-	assert.match(error.message, /authentication_error/);
+	assert.match(error.message, /models\/status/);
 	assert.ok(!error.message.includes("secret-key-value"), "errors must not echo the credential");
 
 	const network = await fetchModelStatus({
 		baseUrl: BASE_URL,
 		apiKey: "secret-key-value",
 		fetchImpl: (async () => {
-			throw new Error("connect ECONNREFUSED 127.0.0.1:8000");
+			throw new Error("connect ECONNREFUSED with secret-key-value");
 		}) as unknown as typeof fetch,
 	}).catch((e) => e);
 	assert.match(network.message, /catalog request failed/);
-	assert.match(network.message, /ECONNREFUSED/);
 	assert.ok(!network.message.includes("secret-key-value"));
 
 	const malformed = await fetchModelStatus({
@@ -186,4 +216,11 @@ test("failures name the endpoint and status without repeating the key", async ()
 		fetchImpl: (async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } })) as unknown as typeof fetch,
 	}).catch((e) => e);
 	assert.match(malformed.message, /no model list/);
+});
+
+test("invalid response bodies fail without exposing the body", async () => {
+	const { fetchImpl } = await fetchWith(undefined, { text: "secret-key-value" });
+	await assert.rejects(fetchModelStatus({ baseUrl: BASE_URL, apiKey: "secret-key-value", fetchImpl }), {
+		message: `oMLX ${BASE_URL}/models/status returned invalid JSON`,
+	});
 });

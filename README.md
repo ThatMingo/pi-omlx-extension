@@ -10,7 +10,7 @@ Two features, both built on Pi's native provider architecture:
 No commands, no custom UI, no credentials, no config files, no automatic level switching, no model loading/unloading. Only `GET` requests.
 
 ```
-pi-omlx-model-picker.ts         78 lines: register `omlx` as a dynamic provider with refreshModels
+pi-omlx-model-picker.ts         register `omlx` as a dynamic provider with refreshModels
 src/omlx.ts                     oMLX catalog read, chat-model filter, capability → thinkingLevelMap
 test/omlx.test.ts               catalog + capability unit tests
 test/extension.test.ts          refresh phases, add/remove, credential, failure, persisted catalog, publication and cancellation rules
@@ -29,9 +29,9 @@ Pi supplies both phases, and the extension answers them like this:
 | Phase | Behavior |
 |---|---|
 | offline (`allowNetwork: false`, `PI_OFFLINE=1`) | returns the catalog this process last read, or the one Pi persisted for `omlx` — re-stamped with the base URL Pi is configured with now; no network. Returns nothing when neither exists, so Pi's existing state stays intact |
-| network, Pi has an `omlx` key | `GET {baseUrl}/v1/models/status` → filtered, capability-mapped list, published in memory and handed to Pi's store via `context.publish({ persist })`; a publication Pi rejects (a newer refresh won) is applied nowhere |
+| network, Pi has an `omlx` key | `GET {baseUrl}/v1/models/status` → filtered, capability-mapped list, published in memory and handed to Pi's store via `context.publish({ persist })`; Pi checks the refresh generation before publishing |
 | network, no key configured | returns unchanged: the extension does not create credentials or logins |
-| request failure | rejects, so Pi reports it in `/model`; because the list is only published after a successful read, the previous catalog survives |
+| request failure or malformed response | Pi reports the failure in `/model` and keeps the previous catalog |
 
 ### Why the offline phase publishes anything
 
@@ -45,7 +45,7 @@ InteractiveMode.run                                                  →  backgr
 
 Only the offline phase runs before Pi resolves the selected model, clamps the saved thinking level, and builds the scoped model list. If it returns nothing, Pi resolves `models.json`'s static `models` entry and keeps that model object for the whole session — with `reasoning: false` there, Pi calls the model non-reasoning, pins the level to `off`, and refuses to change it. The interactive refresh corrects the catalog seconds later, but not the model the session already holds, which is why reselecting in `/model` appeared to fix it.
 
-So the offline phase publishes the discovered capabilities itself: this process's last read, or the entry Pi persisted for the provider (`context.stored`, `~/.pi/agent/models-store.json`) — the same mechanism Pi's llama.cpp extension uses. A restored definition is re-stamped with the base URL Pi composed for this refresh: Pi honors a model's own `baseUrl` above the provider URL from `models.json`, so an unrestamped snapshot would keep talking to a retired host or port until the network read replaced it. The extension never writes that file: it hands the catalog to Pi through `context.publish({ persist })`, and Pi owns the file, its schema, and its removal. `models.json` is never written, and its static entry stays harmless because Pi applies extension-provided definitions above `models.json` `models` entries. Each successful read replaces the entry, so a model removed from oMLX does not resurface on the next start (asserted in `test/startup.test.ts`). Unlike llama.cpp, which reads unloaded models' chat templates lazily because llama reports templates only for loaded engines, oMLX reports every model's reasoning vocabulary in one catalog response, loaded or not, so unloaded oMLX models keep their full level list.
+So the offline phase publishes the discovered capabilities itself: this process's last read, or the entry Pi persisted for the provider (`context.stored`, `~/.pi/agent/models-store.json`) — the same mechanism Pi's llama.cpp extension uses. A restored definition uses the current base URL Pi composed for this refresh: Pi honors a model's own `baseUrl` above the provider URL from `models.json`, so an unrestamped snapshot would keep talking to a retired host or port until the network read replaced it. A bare server URL gets the same `/v1` suffix for discovery and inference. The extension never writes that file: it hands the catalog to Pi through `context.publish({ persist })`, and Pi owns the file, its schema, and its removal. `models.json` is never written, and its static entry stays harmless because Pi applies extension-provided definitions above `models.json` `models` entries. Each successful read replaces the entry, so a model removed from oMLX does not resurface on the next start (asserted in `test/startup.test.ts`). Unlike llama.cpp, which reads unloaded models' chat templates lazily because llama reports templates only for loaded engines, oMLX reports every model's reasoning vocabulary in one catalog response, loaded or not, so unloaded oMLX models keep their full level list.
 
 ## 2. Reasoning controls from oMLX
 
@@ -53,14 +53,15 @@ So the offline phase publishes the discovered capabilities itself: this process'
 
 | field | meaning in oMLX |
 |---|---|
+| `reasoning_levels` | final levels from oMLX’s chat selector, including `off` and toggle-only `on`. An empty array means oMLX offers no controls |
 | `reasoning_efforts` | effort names the model's own chat template accepts, detected by `model_discovery.detect_reasoning_effort` from a subset of `low, medium, high, xhigh, max`. `null` = the template does not read `reasoning_effort`; `[]` = it reads it but names none |
 | `thinking_default` | non-null when oMLX has a thinking on/off switch for the model |
 | `is_helper` | speculative drafter (dFlash/MTP) |
 | `is_hidden` | hidden in oMLX |
-| `model_type`, `engine_type`, `realtime_*` | service kind, chat vs non-chat |
+| `model_type`, `realtime_*` | service kind and chat input capability |
 | `max_context_window`, `model_context_length`, `max_tokens` | limits |
 
-Levels are derived with the same rule oMLX uses to build its own reasoning slider (`admin/routes._reasoning_levels`), minus oMLX's family-specific overrides — so the values offered are exactly the values oMLX accepts, and no family name is ever inspected:
+The extension uses `reasoning_levels` when the server supplies it. Older servers use template metadata with fallbacks for K2 Horizon, DeepSeek V4/V4.1, GPT-OSS and MiniMax M3. The following examples show the standard template fallback:
 
 | oMLX reports | Pi levels |
 |---|---|
@@ -84,7 +85,7 @@ Levels are derived with the same rule oMLX uses to build its own reasoning slide
 
 Unsupported levels never need patching: `clampThinkingLevel` runs inside Pi's request builder, so Pi clamps to the model's own vocabulary before the payload exists. Verified live below (`!` marks a clamped request). Other compat flags follow oMLX's request schema: `maxTokensField: "max_tokens"`, `supportsReasoningEffort` per model, `supportsStore/supportsDeveloperRole/supportsStrictMode: false`, `supportsUsageInStreaming: true`.
 
-**Filtering** is metadata-only: `is_helper`, `is_hidden`, `realtime_voice`/`realtime_stt`, and oMLX's non-chat service types (`markitdown`, `embedding*`, `reranker`, `audio_*`, `decision`) are dropped. An oMLX model type this extension has never seen is kept when oMLX reports chat limits for it, so a new chat family is not excluded by an out-of-date type list. Limits come from the tightest reported value; `max_tokens` is capped by the context window; `vlm` engine ⇒ `input: ["text","image"]`.
+**Filtering** is metadata-only: `is_helper`, `is_hidden`, `realtime_voice`/`realtime_stt`, and oMLX's non-chat service types (`markitdown`, `embedding*`, `reranker`, `audio_*`, `decision`) are dropped. An oMLX model type this extension has never seen is kept when oMLX reports chat limits for it, so a new chat family is not excluded by an out-of-date type list. Limits come from the tightest reported value; `max_tokens` is capped by the context window; a `vlm` model type advertises text and image input.
 
 ## Credentials
 
@@ -93,10 +94,10 @@ The extension adds none. It sends no key of its own: Pi composes the provider fr
 ## Verify
 
 ```bash
-npm test          # 44 tests: 16 unit + 14 extension refresh/publication + 8 against Pi's real provider composer / thinking selector / request builder + 6 against Pi's real startup path
+npm test          # 53 tests covering catalog mapping, refreshes, Pi requests and startup
 npm run typecheck # tsc -p tsconfig.json against the shipped code (needs a tsc on PATH, e.g. `npx -p typescript tsc -p tsconfig.json`; none is vendored here)
 npm run check     # read-only: live catalog, filtered entries, and the exact payload Pi sends per level
-npm run check:live # additionally runs one short completion per level on a model oMLX already has loaded
+npm run check:live # probes thinking levels on one already-loaded model
 ```
 
 Example output captured during development (available models and levels will differ):
@@ -161,11 +162,10 @@ Pi labels an extension by its entry file, which is why the entry point is `pi-om
 
 ## Limitations
 
-- **oMLX's family-specific effort vocabularies are not visible.** oMLX's admin slider overrides efforts for a few internal families (`k2_horizon`, `deepseek_v4*`, `gpt_oss` harmony collapsing). `/v1/models/status` reports what the checkpoint template names, so such models get the template-detected vocabulary instead of oMLX's override. Using `/admin/api/models` would supply those overrides, but it is an admin endpoint whose availability varies, and its failure handling was a known source of breakage — the catalog now depends on one OpenAI-compatible endpoint only.
-- **Thinking that cannot be switched off is not detectable through `/v1/models/status`.** oMLX marks forced thinking in its admin API only. A forced-thinking model would therefore show an `off` level; oMLX ignores that switch rather than erroring.
+- **Older oMLX builds may expose less information.** When a build lacks `reasoning_levels`, the extension knows the family exceptions listed above and uses template metadata for other models.
 - **`/v1/models/status` is the only oMLX endpoint used.** If it is unavailable (older server build, auth failure), the catalog does not change and Pi surfaces the error; the extension does not guess a catalog from `/v1/models`, which lists drafters and non-chat services without their metadata.
 - **Capabilities are known from the second run onward.** Pi resolves the session model before it reads oMLX over the network, so a process can only start from capabilities it already has. The first Pi run after installing the extension therefore uses `models.json`'s entry until its first successful read lands moments later (reopening `/model` or restarting settles it); every later start, including `PI_OFFLINE=1` and `/reload`, starts from the persisted capabilities. A saved snapshot is only ever replaced by a successful read, so it is at most one startup behind oMLX.
 - **Pi's level vocabulary is fixed** (`off, minimal, low, medium, high, xhigh, max`); oMLX names outside it cannot be exposed, and Pi clamps removed levels to the nearest supported one.
-- **Toggle-only models expose one thinking level** (`low`), since on/off has no depth to name.
+- **Toggle-only models use `low` for thinking on.** Pi has no `on` label in its selector.
 - Costs are declared as zero, matching a local server.
 - `thinking_budget` is not sent: Pi's thinking budgets are request-local token accounting, and oMLX budgets thinking inside the same `max_tokens`.

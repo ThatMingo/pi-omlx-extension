@@ -36,10 +36,11 @@ function load(configure?: (config: Record<string, any>) => void, options: { publ
 	const refresh = async (context: RefreshContext) => {
 		const refreshed = await registration.config.refreshModels({
 			publish: async (publication: Publication) => {
+				// Pi rejects superseded publications before updating either destination.
+				if (options.publishAccepts === false) return false;
 				if (publication.persist) state.persisted = publication.persist;
 				publication.update?.();
-				// Pi's publication is generation-checked: false means this refresh was superseded.
-				return options.publishAccepts ?? true;
+				return true;
 			},
 			...context,
 		});
@@ -273,6 +274,7 @@ test("a publication Pi rejects is applied nowhere and remembered nowhere", async
 	const result = await harness.refresh({ allowNetwork: true, signal: signal(), baseUrl: "http://127.0.0.1:8000/v1", credential: { type: "api_key", key: "k" } });
 	assert.equal(result, undefined, "a superseded refresh hands Pi no catalog");
 	assert.deepEqual(harness.ids(), [], "and its models are not applied to the live catalog");
+	assert.equal(harness.state.persisted, undefined, "a superseded publication must not reach the store");
 
 	const offline = await harness.refresh({ allowNetwork: false, signal: signal() });
 	assert.equal(offline, undefined, "a catalog Pi discarded is not kept as this process's last known catalog");
@@ -301,4 +303,33 @@ test("a cancellation that races the response publishes nothing and applies nothi
 	assert.equal(result, undefined, "a cancelled refresh yields nothing");
 	assert.equal(harness.state.persisted, undefined, "nothing is persisted for a cancelled refresh");
 	assert.deepEqual(harness.ids(), []);
+});
+
+test("a malformed status list preserves the last catalog, and an empty list replaces it", async () => {
+	fetchReturning([
+		() => status(chatModel("Model-A")),
+		() => ({ models: [null] }),
+		() => ({ models: [{ id: 7 }] }),
+		() => ({ models: [{ id: "Model-B", reasoning_levels: "high" }] }),
+		() => status(),
+	]);
+	const harness = load();
+	const context = { allowNetwork: true, signal: signal(), credential: { type: "api_key", key: "key" } };
+
+	await harness.refresh(context);
+	for (let attempt = 0; attempt < 3; attempt++) {
+		await assert.rejects(harness.refresh(context), /invalid model entry/);
+		assert.deepEqual(harness.ids(), ["Model-A"]);
+		assert.deepEqual(harness.persistedIds(), ["Model-A"]);
+	}
+	await harness.refresh(context);
+	assert.deepEqual(harness.ids(), []);
+	assert.deepEqual(harness.state.persisted?.models, []);
+});
+
+test("an unusable stored list leaves Pi's current catalog in place", async () => {
+	const harness = load();
+	const context = { allowNetwork: false, signal: signal() };
+	assert.equal(await harness.refresh({ ...context, stored: { models: [{ provider: "other", id: "Foreign" }] } }), undefined);
+	assert.deepEqual(await harness.refresh({ ...context, stored: { models: [] } }), []);
 });

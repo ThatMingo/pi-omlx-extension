@@ -12,21 +12,21 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import omlxExtension from "../pi-omlx-model-picker.ts";
+import { DEFAULT_BASE_URL, fetchModelStatus, isChatModel, PI_LEVELS, PROVIDER_ID } from "../src/omlx.ts";
 
 const PI_DIR = process.env.PI_PACKAGE_DIR ?? "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent";
 const PI_AI_DIR = `${PI_DIR}/node_modules/@earendil-works/pi-ai/dist`;
-const PROVIDER_ID = "omlx";
 
 const composer = await import(`${PI_DIR}/dist/core/provider-composer.js`);
 const openaiCompletions = await import(`${PI_AI_DIR}/api/openai-completions.js`);
 const { getSupportedThinkingLevels } = await import(`${PI_AI_DIR}/models.js`);
-const { fetchModelStatus, isChatModel, PI_LEVELS } = await import("../src/omlx.ts");
+const { readStoredCredential } = await import(`${PI_DIR}/dist/core/auth-storage.js`);
 
-function piProviderConfig(): { entry: Record<string, any>; path: string } {
+function piProviderConfig(): { entry: Record<string, any>; path: string; authPath: string } {
 	const agentDir = process.env.PI_CODING_AGENT_DIR ?? `${process.env.HOME}/.pi/agent`;
 	const path = `${agentDir}/models.json`;
 	const parsed = existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Record<string, any>) : {};
-	return { entry: parsed?.providers?.[PROVIDER_ID] ?? {}, path };
+	return { entry: parsed?.providers?.[PROVIDER_ID] ?? {}, path, authPath: `${agentDir}/auth.json` };
 }
 
 function extensionConfig(): Record<string, any> {
@@ -43,19 +43,23 @@ function publish() {
 	};
 }
 
-const { entry, path: modelsJsonPath } = piProviderConfig();
+const { entry, path: modelsJsonPath, authPath } = piProviderConfig();
 const modelConfig = { getProvider: (id: string) => (id === PROVIDER_ID ? entry : undefined) };
 const provider = composer.composeModelProvider(PROVIDER_ID, undefined, modelConfig, extensionConfig());
-const credential = provider.auth.apiKey
-	? await provider.auth.apiKey.resolve({ ctx: { env: async (name: string) => process.env[name] }, signal: new AbortController().signal })
-	: undefined;
+const baseUrl = provider.baseUrl ?? DEFAULT_BASE_URL;
+const stored = readStoredCredential(PROVIDER_ID, authPath);
+const credential = await provider.auth.apiKey?.resolve({
+	credential: stored?.type === "api_key" ? stored : undefined,
+	ctx: { env: async (name: string) => process.env[name] },
+	signal: new AbortController().signal,
+});
 
-console.log(`oMLX  ${provider.baseUrl}   (base URL from ${modelsJsonPath})`);
+console.log(`oMLX  ${baseUrl}   (configuration: ${modelsJsonPath})`);
 console.log(`API key: ${credential ? `${credential.source} [value not shown]` : "not configured in Pi"}`);
 
 // One status read, reused for the catalog path and for reporting what was filtered out.
 const statusModels = credential
-	? await fetchModelStatus({ baseUrl: provider.baseUrl, apiKey: credential.auth.apiKey, signal: AbortSignal.timeout(15_000) })
+	? await fetchModelStatus({ baseUrl, apiKey: credential.auth.apiKey, signal: AbortSignal.timeout(15_000) })
 	: [];
 const statusFetch = globalThis.fetch;
 globalThis.fetch = (async () =>
@@ -65,7 +69,7 @@ try {
 		allowNetwork: true,
 		force: true,
 		signal: AbortSignal.timeout(15_000),
-		baseUrl: provider.baseUrl,
+		baseUrl,
 		credential: credential ? { type: "api_key", key: credential.auth.apiKey } : undefined,
 		publish: publish(),
 	});
@@ -120,6 +124,7 @@ const requestPayload = async (model: any, level: string, fetchImpl: typeof fetch
 		},
 	);
 	for await (const event of stream) {
+		if (event.type === "error") throw new Error(`Pi request failed for ${model.id} at thinking level ${level}`);
 		if (event.type === "thinking_delta") chunks.thinking += event.delta ?? "";
 		if (event.type === "text_delta") chunks.text += event.delta ?? "";
 	}
@@ -144,9 +149,10 @@ const probeFlag = process.argv.indexOf("--probe");
 if (probeFlag !== -1) {
 	const requested = process.argv[probeFlag + 1];
 	const loadedIds = new Set(statusModels.filter((item) => item.loaded === true).map((item) => item.id));
-	const probeModel = models.find((model) => (requested ? model.id === requested : loadedIds.has(model.id)));
+	const probeModel = models.find((model) => loadedIds.has(model.id) && (!requested || model.id === requested));
 	if (!probeModel) {
-		console.log("\n--probe: no loaded chat model available, nothing probed (the extension never loads a model)");
+		const detail = requested ? `${requested} is not an already-loaded chat model` : "no loaded chat model available";
+		console.log(`\n--probe: ${detail}, nothing probed`);
 	} else {
 		const levels = [...new Set(["off", "minimal", "low", "high", "max", getSupportedThinkingLevels(probeModel).at(-1) ?? "off"])];
 		console.log(`\nlive probe on ${probeModel.id} (already loaded in oMLX; "!" = level Pi clamps for this model)`);

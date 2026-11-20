@@ -1,50 +1,18 @@
-/**
- * oMLX catalog and reasoning-capability discovery (read-only).
- *
- * One endpoint drives both features of the extension: `GET /v1/models/status` lists every model
- * oMLX knows (loaded or not) together with the metadata that decides
- *   - whether it is a chat model at all (helper/draft, hidden, non-chat services), and
- *   - which reasoning levels the model's own chat template accepts.
- *
- * oMLX fills `reasoning_efforts` by reading each checkpoint's chat template
- * (`model_discovery.detect_reasoning_effort`), so capability discovery is model-agnostic: it works
- * for any family oMLX supports, and the values it reports are exactly the values oMLX will accept
- * on `/v1/chat/completions`. Level names that Pi cannot express are dropped instead of guessed.
- */
-
-import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 
 export const DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1";
-
-/** The provider id this extension registers. Every catalog entry it publishes names it. */
 export const PROVIDER_ID = "omlx";
 
 const REQUEST_TIMEOUT_MS = 10_000;
-
-/** oMLX's canonical effort names (`model_discovery.REASONING_EFFORT_LEVELS`). */
-const OMLX_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-
-/** Pi's fixed thinking-level vocabulary; nothing outside it can be offered. */
-export const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
-export type PiLevel = (typeof PI_LEVELS)[number];
-
-/** Chat-generation model types reported by oMLX. Unknown types are judged by their limits. */
-const CHAT_MODEL_TYPES = new Set(["llm", "vlm"]);
-
-/** Non-chat services in oMLX's own taxonomy (`model_discovery.detect_model_type` and services). */
-const NON_CHAT_MODEL_TYPES = new Set([
-	"embedding",
-	"reranker",
-	"audio_stt",
-	"audio_tts",
-	"audio_sts",
-	"decision",
-	"markitdown",
-]);
-
-/** Fallbacks used only when oMLX reports no limits for a chat model. */
 const FALLBACK_CONTEXT_WINDOW = 32768;
 const FALLBACK_MAX_TOKENS = 4096;
+
+const OMLX_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const PI_LEVELS = ["off", "minimal", ...OMLX_EFFORTS] as const;
+export type PiLevel = (typeof PI_LEVELS)[number];
+
+const CHAT_MODEL_TYPES = new Set(["llm", "vlm"]);
+const NON_CHAT_MODEL_TYPES = new Set(["reranker", "decision", "markitdown"]);
 
 export interface OmlxModelStatus {
 	id: string;
@@ -58,126 +26,86 @@ export interface OmlxModelStatus {
 	model_context_length?: number | null;
 	max_context_window?: number | null;
 	max_tokens?: number | null;
+	reasoning_levels?: string[] | null;
 	reasoning_efforts?: string[] | null;
 	thinking_default?: boolean | null;
 	loaded?: boolean | null;
 }
 
-/**
- * A model definition plus the `provider` field Pi itself puts on every catalog entry.
- * Pi's `ProviderModelConfig` does not declare `provider` (Pi fills it in when it composes models),
- * but a persisted catalog entry needs it: Pi hands `context.stored` back verbatim and
- * `storedCatalogOf` only trusts entries that name this provider.
- */
-export type OmlxModelDefinition = ProviderModelConfig & { provider: string };
-
-export interface Capability {
-	/** Whether Pi should treat the model as a reasoning model at all. */
-	reasoning: boolean;
-	/** Effort levels to expose, in oMLX's own names. Empty when thinking is unavailable. */
-	efforts: string[];
-	/** Whether oMLX offers a thinking on/off switch (its `thinking_default` control). */
-	toggle: boolean;
-	/** Whether the model's template reads `reasoning_effort`, i.e. it has a depth dial. */
-	supportsReasoningEffort: boolean;
-	/** Pi level -> oMLX effort, or null to remove the level from Pi's selector. */
-	thinkingLevelMap: Record<PiLevel, string | null>;
-}
+// Pi's persisted models include their provider.
+export type OmlxModelDefinition = Model<"openai-completions"> & { provider: typeof PROVIDER_ID };
 
 function positiveInt(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
-/** Tightest reported limit: oMLX's runtime cap never exceeds the checkpoint's context length. */
-function contextWindowOf(model: OmlxModelStatus): number {
-	const reported = [positiveInt(model.max_context_window), positiveInt(model.model_context_length)].filter(
-		(value): value is number => value !== undefined,
-	);
-	return reported.length > 0 ? Math.min(...reported) : FALLBACK_CONTEXT_WINDOW;
-}
-
-function maxTokensOf(model: OmlxModelStatus, contextWindow: number): number {
-	const reported = positiveInt(model.max_tokens) ?? FALLBACK_MAX_TOKENS;
-	return Math.min(reported, contextWindow);
-}
-
-function nonChatType(modelType: string | null | undefined): boolean {
-	if (!modelType) return false;
-	const normalized = modelType.toLowerCase();
-	return (
-		NON_CHAT_MODEL_TYPES.has(normalized) ||
-		normalized.startsWith("embedding") ||
-		normalized.startsWith("audio_")
-	);
-}
-
-/**
- * Whether oMLX exposes this entry as a chat model. Only oMLX metadata decides: helper drafters
- * (dFlash/MTP), hidden entries, realtime voice models, and non-chat services are dropped. A model
- * type this extension has never seen is kept when oMLX reports chat limits for it, so new chat
- * families are not excluded by an out-of-date type list.
- */
 export function isChatModel(model: OmlxModelStatus): { included: boolean; reason?: string } {
 	if (model.is_helper === true) return { included: false, reason: "helper model (draft/MTP)" };
 	if (model.is_hidden === true) return { included: false, reason: "hidden in oMLX" };
 	if (model.realtime_voice === true || model.realtime_stt === true) {
 		return { included: false, reason: "realtime voice model" };
 	}
-	if (nonChatType(model.model_type)) return { included: false, reason: `model_type=${model.model_type}` };
-	if (model.model_type && !CHAT_MODEL_TYPES.has(model.model_type.toLowerCase())) {
-		const reportsChatLimits = positiveInt(model.max_context_window) !== undefined || positiveInt(model.model_context_length) !== undefined;
-		if (!reportsChatLimits) return { included: false, reason: `model_type=${model.model_type} without chat limits` };
+
+	const type = model.model_type?.toLowerCase();
+	if (type && (NON_CHAT_MODEL_TYPES.has(type) || type.startsWith("embedding") || type.startsWith("audio_"))) {
+		return { included: false, reason: `model_type=${model.model_type}` };
+	}
+
+	// Keep unfamiliar model types when oMLX reports a chat context limit.
+	const contextLimit = positiveInt(model.max_context_window) ?? positiveInt(model.model_context_length);
+	if (type && !CHAT_MODEL_TYPES.has(type) && contextLimit === undefined) {
+		return { included: false, reason: `model_type=${model.model_type} without chat limits` };
 	}
 	return { included: true };
 }
 
-/**
- * Derive a model's reasoning controls, following the same rule oMLX uses to build its own
- * reasoning slider (`admin/routes._reasoning_levels`), minus oMLX's family-specific overrides:
- *   - `thinking_default` set        -> thinking can be switched on and off
- *   - `reasoning_efforts` non-empty -> the template names those effort levels
- *   - `reasoning_efforts` empty     -> the template reads the value but names nothing,
- *                                      so oMLX offers its full canonical dial
- *   - `reasoning_efforts` null      -> the template does not read the value at all
- */
-export function capabilityOf(model: OmlxModelStatus): Capability {
-	const reported = model.reasoning_efforts;
-	const efforts = reported === null || reported === undefined
-		? []
-		: reported.length === 0
-			? [...OMLX_EFFORTS]
-			: reported.filter((level) => typeof level === "string" && level.length > 0);
-	const toggle = model.thinking_default !== null && model.thinking_default !== undefined;
-	const thinkingLevelMap = Object.fromEntries(
-		PI_LEVELS.map((level) => {
-			if (level === "off") return [level, toggle ? "off" : null];
-			if (level === "minimal") return [level, null]; // oMLX never names "minimal"
-			return [level, efforts.includes(level) ? level : null];
-		}),
-	) as Record<PiLevel, string | null>;
+function reasoningLevelsOf(model: OmlxModelStatus): readonly string[] {
+	if (model.reasoning_levels != null) return model.reasoning_levels;
 
-	// A thinking model without a depth dial still needs one selectable "thinking on" level.
-	// `supportsReasoningEffort: false` keeps Pi from sending an effort value it cannot honor.
-	if (toggle && efforts.length === 0) thinkingLevelMap.low = "on";
+	// Older oMLX builds expose template metadata and the checkpoint family.
+	const family = model.config_model_type?.toLowerCase().replace(/-/g, "_") ?? "";
+	if (family === "k2_horizon") return ["low", "medium", "high"];
+	if (family.startsWith("deepseek_v4")) return ["off", "low", "high", "max"];
+
+	let efforts: readonly string[] = model.reasoning_efforts ?? [];
+	if (family === "gpt_oss") efforts = ["low", "medium", "high"];
+	else if (model.reasoning_efforts?.length === 0) efforts = OMLX_EFFORTS;
+
+	const toggle = typeof model.thinking_default === "boolean" || family.startsWith("minimax_m3");
+	if (!toggle) return efforts;
+	return efforts.length ? ["off", ...efforts] : ["off", "on"];
+}
+
+export function capabilityOf(model: OmlxModelStatus) {
+	const levels = reasoningLevelsOf(model);
+	const efforts = OMLX_EFFORTS.filter((effort) => levels.includes(effort));
+	const canTurnOff = levels.includes("off");
+	const canTurnOn = levels.includes("on");
+	const thinkingLevelMap: Record<PiLevel, string | null> = {
+		off: canTurnOff ? "off" : null,
+		minimal: null,
+		low: canTurnOn && !efforts.length ? "on" : null,
+		medium: null,
+		high: null,
+		xhigh: null,
+		max: null,
+	};
+	for (const effort of efforts) thinkingLevelMap[effort] = effort;
 
 	return {
-		reasoning: toggle || efforts.length > 0,
-		efforts,
-		toggle,
+		reasoning: canTurnOff || canTurnOn || efforts.length > 0,
 		supportsReasoningEffort: efforts.length > 0,
 		thinkingLevelMap,
 	};
 }
 
-export function levelsOf(capability: Capability): PiLevel[] {
-	return PI_LEVELS.filter((level) => capability.thinkingLevelMap[level] !== null);
-}
-
-/** Build one Pi model definition from one oMLX status entry. */
 export function modelConfigOf(model: OmlxModelStatus, baseUrl: string): OmlxModelDefinition {
 	const capability = capabilityOf(model);
-	const contextWindow = contextWindowOf(model);
-	const vision = model.model_type?.toLowerCase() === "vlm" || model.engine_type?.toLowerCase() === "vlm";
+	const limits = [positiveInt(model.max_context_window), positiveInt(model.model_context_length)]
+		.filter((limit): limit is number => limit !== undefined);
+	const contextWindow = limits.length ? Math.min(...limits) : FALLBACK_CONTEXT_WINDOW;
+	const vision = model.model_type?.toLowerCase() === "vlm";
+
 	return {
 		id: model.id,
 		name: model.id,
@@ -189,7 +117,7 @@ export function modelConfigOf(model: OmlxModelStatus, baseUrl: string): OmlxMode
 		input: vision ? ["text", "image"] : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow,
-		maxTokens: maxTokensOf(model, contextWindow),
+		maxTokens: Math.min(positiveInt(model.max_tokens) ?? FALLBACK_MAX_TOKENS, contextWindow),
 		compat: {
 			maxTokensField: "max_tokens",
 			supportsStore: false,
@@ -197,49 +125,42 @@ export function modelConfigOf(model: OmlxModelStatus, baseUrl: string): OmlxMode
 			supportsStrictMode: false,
 			supportsUsageInStreaming: true,
 			supportsReasoningEffort: capability.supportsReasoningEffort,
-			// oMLX takes thinking control as top-level `enable_thinking` (+ `reasoning_effort`)
-			// and normalizes it into chat-template kwargs for every family itself.
+			// Pi's qwen format sends oMLX's top-level enable_thinking and reasoning_effort.
 			...(capability.reasoning && { thinkingFormat: "qwen" as const }),
 		},
 	};
 }
 
-/** Full catalog: filtered, capability-mapped definitions in oMLX's own order. */
 export function buildCatalog(models: readonly OmlxModelStatus[], baseUrl: string): OmlxModelDefinition[] {
-	return models.filter((model) => model.id && isChatModel(model).included).map((model) => modelConfigOf(model, baseUrl));
+	return models.filter((model) => isChatModel(model).included).map((model) => modelConfigOf(model, baseUrl));
 }
 
-/**
- * Re-stamp definitions with the base URL Pi composed for this refresh.
- *
- * Every definition carries its own `baseUrl`, and Pi honors a model's own URL above the `models.json`
- * provider URL, so a catalog restored from an earlier run would otherwise keep a retired host or port
- * for the whole session — the network read that could correct it happens after Pi has already selected
- * the model. Re-stamping makes the configured URL authoritative the moment it is restored.
- */
-export function withBaseUrl(models: OmlxModelDefinition[] | undefined, baseUrl: string): OmlxModelDefinition[] | undefined {
-	if (!models) return undefined;
-	return models.map((model) => (model.baseUrl === baseUrl ? model : { ...model, baseUrl }));
-}
-
-/**
- * The catalog Pi persisted for this provider in an earlier run (`context.stored`, i.e. the provider's
- * entry in `models-store.json`). Entries that are not this provider's own chat definitions are dropped,
- * so a foreign or malformed entry cannot inject models.
- */
-export function storedCatalogOf(stored: { models?: readonly unknown[] } | undefined, providerId: string): OmlxModelDefinition[] {
-	if (!stored || !Array.isArray(stored.models)) return [];
-	return stored.models.filter((model): model is OmlxModelDefinition => {
+export function storedCatalogOf(stored: { models?: readonly unknown[] } | undefined): OmlxModelDefinition[] | undefined {
+	if (!Array.isArray(stored?.models)) return undefined;
+	const models = stored.models.filter((model): model is OmlxModelDefinition => {
 		if (typeof model !== "object" || model === null) return false;
-		const definition = model as { id?: unknown; provider?: unknown; type?: unknown };
-		return typeof definition.id === "string" && definition.id.length > 0 && definition.provider === providerId && (definition.type === undefined || definition.type === "chat");
+		const { id, provider, type } = model as { id?: unknown; provider?: unknown; type?: unknown };
+		return typeof id === "string" && id.trim().length > 0 && provider === PROVIDER_ID && (type === undefined || type === "chat");
 	});
+	return models.length > 0 || stored.models.length === 0 ? models : undefined;
 }
 
-/** `.../v1` -> `.../v1/models/status`; a bare host is completed with the OpenAI-compatible prefix. */
-export function statusUrlOf(baseUrl: string): string {
+export function apiBaseUrlOf(baseUrl: string): string {
 	const trimmed = baseUrl.trim().replace(/\/+$/, "");
-	return /\/v\d+$/.test(trimmed) ? `${trimmed}/models/status` : `${trimmed}/v1/models/status`;
+	return /\/v\d+$/.test(trimmed) ? trimmed : `${trimmed}/v1`;
+}
+
+export function statusUrlOf(baseUrl: string): string {
+	return `${apiBaseUrlOf(baseUrl)}/models/status`;
+}
+
+function isModelStatus(value: unknown): value is OmlxModelStatus {
+	if (typeof value !== "object" || value === null) return false;
+	const { id, model_type, config_model_type, reasoning_levels, reasoning_efforts } = value as Record<string, unknown>;
+	return typeof id === "string" && id.trim().length > 0
+		&& [model_type, config_model_type].every((type) => type == null || typeof type === "string")
+		&& [reasoning_levels, reasoning_efforts].every((levels) => levels == null
+			|| (Array.isArray(levels) && levels.every((level) => typeof level === "string")));
 }
 
 export async function fetchModelStatus(options: {
@@ -250,9 +171,8 @@ export async function fetchModelStatus(options: {
 }): Promise<OmlxModelStatus[]> {
 	const url = statusUrlOf(options.baseUrl);
 	const fetchImpl = options.fetchImpl ?? globalThis.fetch;
-	const signal = options.signal
-		? AbortSignal.any([options.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
-		: AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 
 	let response: Response;
 	try {
@@ -260,16 +180,20 @@ export async function fetchModelStatus(options: {
 			headers: { Accept: "application/json", Authorization: `Bearer ${options.apiKey}` },
 			signal,
 		});
-	} catch (error) {
-		// Never echo the request: it carries the credential.
-		throw new Error(`oMLX catalog request failed (${url}): ${error instanceof Error ? error.message : String(error)}`);
+	} catch {
+		const detail = timeout.aborted ? ": timed out" : "";
+		throw new Error(`oMLX catalog request failed (${url})${detail}`);
 	}
 	if (!response.ok) {
-		const detail = await response.text().catch(() => "");
-		const code = (detail.match(/"code"\s*:\s*"([^"]+)"/) ?? [])[1];
-		throw new Error(`oMLX ${url} returned ${response.status}${code ? ` (${code})` : ""}`);
+		await response.body?.cancel().catch(() => undefined);
+		throw new Error(`oMLX ${url} returned ${response.status}`);
 	}
-	const payload = (await response.json()) as { models?: OmlxModelStatus[] };
+
+	const payload = await response.json().catch(() => {
+		const detail = timeout.aborted ? "timed out reading the model list" : "returned invalid JSON";
+		throw new Error(`oMLX ${url} ${detail}`);
+	}) as { models?: unknown };
 	if (!Array.isArray(payload?.models)) throw new Error(`oMLX ${url} returned no model list`);
+	if (!payload.models.every(isModelStatus)) throw new Error(`oMLX ${url} returned an invalid model entry`);
 	return payload.models;
 }

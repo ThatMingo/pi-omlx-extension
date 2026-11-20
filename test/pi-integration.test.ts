@@ -18,9 +18,11 @@ const PI_DIR = process.env.PI_PACKAGE_DIR ?? "/opt/homebrew/lib/node_modules/@ea
 const PI_AI_DIR = `${PI_DIR}/node_modules/@earendil-works/pi-ai/dist`;
 const skip = existsSync(PI_DIR) ? false : `Pi package not found at ${PI_DIR}`;
 
-const composer = await import(`${PI_DIR}/dist/core/provider-composer.js`);
-const openaiCompletions = await import(`${PI_AI_DIR}/api/openai-completions.js`);
-const modelsModule = await import(`${PI_AI_DIR}/models.js`);
+const [composer, openaiCompletions, modelsModule] = skip ? [] : await Promise.all([
+	import(`${PI_DIR}/dist/core/provider-composer.js`),
+	import(`${PI_AI_DIR}/api/openai-completions.js`),
+	import(`${PI_AI_DIR}/models.js`),
+]);
 
 /** The `omlx` entry as Pi's `models.json` configures it today, including a stale manual model. */
 const modelsJsonProvider = {
@@ -86,7 +88,7 @@ const sseBody = [
 
 const context = { messages: [{ role: "user", content: "hi", timestamp: Date.now() }], tools: [] } as never;
 
-async function wirePayload(model: any, reasoning: string) {
+async function wirePayload(model: any, reasoning: string, onRequest?: (url: string) => void) {
 	let payload: Record<string, any> | undefined;
 	const stream = openaiCompletions.streamSimple(model, context, {
 		apiKey: modelsJsonProvider.apiKey,
@@ -96,7 +98,10 @@ async function wirePayload(model: any, reasoning: string) {
 		onPayload: (candidate: Record<string, any>) => {
 			payload = candidate;
 		},
-		fetch: (async () => new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch,
+		fetch: (async (url: string | URL | Request) => {
+			onRequest?.(url instanceof Request ? url.url : String(url));
+			return new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } });
+		}) as typeof fetch,
 	});
 	for await (const event of stream) void event;
 	if (!payload) throw new Error("no request payload was produced");
@@ -242,4 +247,48 @@ test("a failed catalog read leaves the catalog untouched", { skip }, async () =>
 		.catch(() => false);
 	assert.equal(published, false, "the refresh rejects so Pi surfaces the error");
 	assert.equal(provider.getModels()[0].id, "FullDial-Model", "the previous catalog is still there");
+});
+
+test("Pi sends inference to the same API prefix used for catalog discovery", { skip }, async () => {
+	const baseUrl = "http://omlx.test:8000";
+	const requests: string[] = [];
+	globalThis.fetch = (async (url: string | URL) => {
+		requests.push(String(url));
+		return new Response(JSON.stringify(statusPayload));
+	}) as typeof fetch;
+
+	const provider = composer.composeModelProvider(
+		"omlx",
+		undefined,
+		{ getProvider: () => ({ ...modelsJsonProvider, baseUrl }) },
+		extensionConfig(),
+	);
+	await refresh(provider);
+
+	const model = provider.getModels().find((item: any) => item.id === "FullDial-Model");
+	assert.ok(model);
+	await wirePayload(model, "low", (url) => requests.push(url));
+	assert.deepEqual(requests, [
+		"http://omlx.test:8000/v1/models/status",
+		"http://omlx.test:8000/v1/chat/completions",
+	]);
+});
+
+test("server-provided reasoning stops determine Pi's selector and request payload", { skip }, async () => {
+	const { models } = await catalogWith([
+		{ id: "ForcedThinking", model_type: "llm", thinking_default: true, reasoning_efforts: ["low"], reasoning_levels: ["high"] },
+		{ id: "ToggleOnly", model_type: "llm", thinking_default: null, reasoning_efforts: ["high"], reasoning_levels: ["off", "on"] },
+	]);
+
+	const forced = models.find((model) => model.id === "ForcedThinking");
+	assert.deepEqual(modelsModule.getSupportedThinkingLevels(forced), ["high"]);
+	const clampedOff = await wirePayload(forced, "off");
+	assert.equal(clampedOff.enable_thinking, true);
+	assert.equal(clampedOff.reasoning_effort, "high");
+
+	const toggle = models.find((model) => model.id === "ToggleOnly");
+	assert.deepEqual(modelsModule.getSupportedThinkingLevels(toggle), ["off", "low"]);
+	const on = await wirePayload(toggle, "low");
+	assert.equal(on.enable_thinking, true);
+	assert.equal("reasoning_effort" in on, false);
 });
